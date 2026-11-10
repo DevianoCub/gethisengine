@@ -41,9 +41,21 @@ type loginsFile struct {
 	Logins []loginEntry `json:"logins"`
 }
 
-// Passwords returns logins.json entries. key may be nil, in which case only
-// the site metadata is returned and password values stay empty.
+// Passwords returns saved logins. Recent Firefox builds use logins.db; older
+// builds use logins.json. When both exist the SQLite store is authoritative.
+// key may be nil, in which case only site metadata is returned.
 func Passwords(profile model.Profile, key *nss.Key4) ([]model.Credential, []string) {
+	if dbPath := artifact(profile, "logins_db", "logins.db"); fileExists(dbPath) {
+		creds, warnings, ok := passwordsFromDB(profile, key, dbPath)
+		if ok {
+			return creds, warnings
+		}
+		// A malformed/old logins.db must not hide a usable logins.json.
+		if jsonPath := artifact(profile, "logins", "logins.json"); !fileExists(jsonPath) {
+			return creds, warnings
+		}
+	}
+
 	path := artifact(profile, "logins", "logins.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -106,6 +118,235 @@ func Passwords(profile model.Profile, key *nss.Key4) ([]model.Credential, []stri
 		out = append(out, cred)
 	}
 	return out, warnings
+}
+
+type loginRow struct {
+	origin           string
+	httpRealm        string
+	formActionOrigin string
+	timesUsed        int64
+	timeCreated      int64
+	timeLastUsed     int64
+	secFields        string
+	guid             string
+}
+
+func passwordsFromDB(profile model.Profile, key *nss.Key4, path string) ([]model.Credential, []string, bool) {
+	db, cleanup, err := dbsqlite.OpenReadOnly(path)
+	if err != nil {
+		return nil, []string{fmt.Sprintf("%s: open logins.db: %v", profile.Browser, err)}, false
+	}
+	defer cleanup()
+
+	var warnings []string
+	rows := make([]loginRow, 0)
+	seen := make(map[string]bool)
+
+	for _, table := range []string{"loginsL", "loginsM"} {
+		if !dbsqlite.HasTable(db, table) {
+			continue
+		}
+		query := fmt.Sprintf(`SELECT origin, httpRealm, formActionOrigin, timesUsed,
+			timeCreated, timeLastUsed, secFields, guid FROM %s`, table)
+		switch table {
+		case "loginsL":
+			if dbsqlite.HasColumn(db, table, "is_deleted") {
+				query += " WHERE is_deleted = 0"
+			}
+		case "loginsM":
+			if dbsqlite.HasColumn(db, table, "is_overridden") {
+				query += " WHERE is_overridden = 0"
+			}
+		}
+		rs, err := db.Query(query)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("%s/%s: query %s: %v", profile.Browser, profile.Name, table, err))
+			continue
+		}
+		for rs.Next() {
+			var (
+				origin, realm, action, secFields, guid sql.NullString
+				timesUsed, created, lastUsed           sql.NullInt64
+			)
+			if err := rs.Scan(&origin, &realm, &action, &timesUsed, &created, &lastUsed, &secFields, &guid); err != nil {
+				warnings = append(warnings, fmt.Sprintf("%s/%s: scan %s: %v", profile.Browser, profile.Name, table, err))
+				continue
+			}
+			key := guid.String
+			if key == "" {
+				key = origin.String + "\x00" + realm.String + "\x00" + action.String
+			}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			rows = append(rows, loginRow{
+				origin:           origin.String,
+				httpRealm:        realm.String,
+				formActionOrigin: action.String,
+				timesUsed:        timesUsed.Int64,
+				timeCreated:      created.Int64,
+				timeLastUsed:     lastUsed.Int64,
+				secFields:        secFields.String,
+				guid:             guid.String,
+			})
+		}
+		if err := rs.Err(); err != nil {
+			warnings = append(warnings, fmt.Sprintf("%s/%s: read %s: %v", profile.Browser, profile.Name, table, err))
+		}
+		rs.Close()
+	}
+
+	out := make([]model.Credential, 0, len(rows))
+	for _, row := range rows {
+		if row.origin == "" {
+			continue
+		}
+		cred := model.Credential{
+			Browser:     profile.Browser,
+			Profile:     profile.Name,
+			URL:         row.origin,
+			Realm:       row.httpRealm,
+			HasPassword: row.secFields != "",
+			TimesUsed:   row.timesUsed,
+		}
+		if row.formActionOrigin != "" && row.formActionOrigin != row.origin {
+			cred.Note = "form action: " + row.formActionOrigin
+		}
+		if strings.HasPrefix(row.origin, "chrome://FirefoxAccounts") {
+			cred.Note = "Mozilla Account credentials"
+			if row.httpRealm != "" {
+				cred.Note += " (" + row.httpRealm + ")"
+			}
+		}
+		if row.timeCreated > 0 {
+			t := time.UnixMilli(row.timeCreated).UTC()
+			cred.Created = &t
+		}
+		if row.timeLastUsed > 0 {
+			t := time.UnixMilli(row.timeLastUsed).UTC()
+			cred.LastUsed = &t
+		}
+
+		if key != nil && row.secFields != "" {
+			plain, err := key.DecryptSecFields(row.secFields)
+			if err != nil {
+				warnings = append(warnings, fmt.Sprintf("%s/%s: decrypt logins.db entry for %s: %v",
+					profile.Browser, profile.Name, row.origin, err))
+				cred.Note = "decryption failed: " + err.Error()
+			} else {
+				user, pass, note, err := parseSecFields(plain)
+				if err != nil {
+					warnings = append(warnings, fmt.Sprintf("%s/%s: parse logins.db entry for %s: %v",
+						profile.Browser, profile.Name, row.origin, err))
+					cred.Note = "unsupported secFields payload"
+				} else {
+					cred.Username = user
+					cred.Password = pass
+					if strings.HasPrefix(row.origin, "chrome://FirefoxAccounts") {
+						// This row contains Mozilla Account sync tokens, not a
+						// site password. Keep the username but never expose
+						// the structured payload as a password.
+						cred.Password = ""
+						note = "Mozilla Account credentials (account data is not a site password)"
+					}
+					if note != "" {
+						cred.Note = note
+					}
+				}
+			}
+		}
+		out = append(out, cred)
+	}
+	return out, warnings, true
+}
+
+func parseSecFields(plain []byte) (username, password, note string, err error) {
+	// Firefox's logins.db stores the short keys u/p. Older or future builds
+	// may use descriptive names, so handle both.
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(plain, &obj); err == nil {
+		readString := func(key string) string {
+			raw, ok := obj[key]
+			if !ok {
+				return ""
+			}
+			var value string
+			if err := json.Unmarshal(raw, &value); err != nil {
+				return ""
+			}
+			return value
+		}
+		username = readString("u")
+		if username == "" {
+			username = readString("username")
+		}
+		if username == "" {
+			username = readString("user")
+		}
+		rawPassword, hasPassword := obj["p"]
+		if !hasPassword {
+			rawPassword, hasPassword = obj["password"]
+		}
+		if hasPassword {
+			var value string
+			if err := json.Unmarshal(rawPassword, &value); err == nil {
+				password = value
+			} else {
+				// Firefox Accounts rows keep a structured account-data object
+				// in p. It is not a site password and must not be printed.
+				var structured any
+				if json.Unmarshal(rawPassword, &structured) == nil {
+					note = "structured account data (no site password)"
+				}
+			}
+		}
+		if action := readString("formActionOrigin"); action != "" {
+			note = "form action: " + action
+		}
+		if username != "" || password != "" || note != "" {
+			return username, password, note, nil
+		}
+	}
+
+	var value any
+	if err := json.Unmarshal(plain, &value); err != nil {
+		return "", "", "", err
+	}
+	var walk func(any)
+	walk = func(v any) {
+		switch typed := v.(type) {
+		case map[string]any:
+			for k, child := range typed {
+				switch strings.ToLower(k) {
+				case "username", "user", "usernamevalue":
+					if s, ok := child.(string); ok && username == "" {
+						username = s
+					}
+				case "password", "pass", "passwordvalue":
+					if s, ok := child.(string); ok && password == "" {
+						password = s
+					}
+				case "formactionorigin", "formaction":
+					if s, ok := child.(string); ok && note == "" {
+						note = "form action: " + s
+					}
+				}
+				walk(child)
+			}
+		case []any:
+			for _, child := range typed {
+				walk(child)
+			}
+		}
+	}
+	walk(value)
+	return username, password, note, nil
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 // History returns visited URLs from places.sqlite.

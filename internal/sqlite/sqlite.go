@@ -70,9 +70,9 @@ func OpenReadOnly(path string) (*sql.DB, func(), error) {
 }
 
 func copyIfExists(src, dst string) error {
-	in, err := os.Open(src)
+	in, err := openSource(src)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if isNotExist(err) {
 			return nil
 		}
 		return fmt.Errorf("copy %s: %w", src, err)

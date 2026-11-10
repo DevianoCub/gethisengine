@@ -3,3 +3,4 @@
 *.exe
 *.test
 report.json
+/inspo/

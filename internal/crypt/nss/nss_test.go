@@ -5,7 +5,6 @@ import (
 	"crypto/cipher"
 	"crypto/des"
 	"crypto/rand"
-	"crypto/sha1"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/asn1"
@@ -14,6 +13,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/crypto/pbkdf2"
@@ -89,8 +89,7 @@ func pbeEncrypt(t *testing.T, plaintext, password, globalSalt []byte) []byte {
 	entrySalt := randomBytes(t, 32)
 	ivContent := randomBytes(t, 14)
 
-	base := sha1.Sum(append(append([]byte(nil), globalSalt...), password...))
-	key := pbkdf2.Key(base[:], entrySalt, 10000, 32, sha256.New)
+	key := pbkdf2.Key(seedHash(globalSalt, password), entrySalt, 10000, 32, sha256.New)
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		t.Fatal(err)
@@ -164,7 +163,7 @@ func encryptLogin(t *testing.T, plaintext string, key []byte, oid asn1.ObjectIde
 func writeKey4(t *testing.T, dir string, password []byte, master []byte) string {
 	t.Helper()
 	globalSalt := randomBytes(t, 32)
-	checkDER := pbeEncrypt(t, []byte("password-check\x02\x02"), password, globalSalt)
+	checkDER := pbeEncrypt(t, []byte("password-check"), password, globalSalt)
 	masterDER := pbeEncrypt(t, master, password, globalSalt)
 
 	path := filepath.Join(dir, "key4.db")
@@ -235,6 +234,88 @@ func TestKey4AndLogins(t *testing.T) {
 	}
 	if pass != "hunter2" {
 		t.Fatalf("got password %q", pass)
+	}
+}
+
+func TestKey4SelectsBothMasterKeys(t *testing.T) {
+	dir := t.TempDir()
+	password := []byte("")
+	globalSalt := randomBytes(t, 20)
+	aesKey := randomBytes(t, 32)
+	desKey := randomBytes(t, 24)
+
+	path := filepath.Join(dir, "key4.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`
+		CREATE TABLE metadata (id TEXT PRIMARY KEY, item1 BLOB, item2 BLOB);
+		CREATE TABLE nssPrivate (id TEXT, a0 BLOB, a11 BLOB, a102 BLOB);
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO metadata VALUES ('password', ?, ?)`,
+		globalSalt, pbeEncrypt(t, []byte("password-check"), password, globalSalt)); err != nil {
+		t.Fatal(err)
+	}
+	// Firefox writes the legacy 3DES key first and the AES key second.
+	if _, err := db.Exec(`INSERT INTO nssPrivate VALUES ('des', ?, ?, ?)`,
+		[]byte{0, 0, 0, 4}, pbeEncrypt(t, desKey, password, globalSalt), []byte("des-id")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO nssPrivate VALUES ('aes', ?, ?, ?)`,
+		[]byte{0, 0, 0, 4}, pbeEncrypt(t, aesKey, password, globalSalt), []byte("aes-id")); err != nil {
+		t.Fatal(err)
+	}
+
+	key, err := NewKey4(path, "")
+	if err != nil {
+		t.Fatalf("NewKey4: %v", err)
+	}
+	aesEntry := encryptLogin(t, "alice", aesKey, oidAES256CBC, 16, aes.BlockSize)
+	if got, err := key.Decrypt(aesEntry); err != nil || got != "alice" {
+		t.Fatalf("AES login: got %q, err %v", got, err)
+	}
+	desEntry := encryptLogin(t, "hunter2", desKey, oid3DESCBC, 8, des.BlockSize)
+	if got, err := key.Decrypt(desEntry); err != nil || got != "hunter2" {
+		t.Fatalf("3DES login: got %q, err %v", got, err)
+	}
+}
+
+func TestSecFieldsJWE(t *testing.T) {
+	keyBytes := randomBytes(t, 32)
+	key, err := NewKey4WithKeys(keyBytes, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := []byte(`{"alg":"dir","enc":"A256GCM"}`)
+	encodedHeader := base64.RawURLEncoding.EncodeToString(header)
+	iv := randomBytes(t, 12)
+	plaintext := []byte(`{"username":"alice","password":"hunter2"}`)
+	block, err := aes.NewCipher(keyBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed := gcm.Seal(nil, iv, plaintext, []byte(encodedHeader))
+	token := strings.Join([]string{
+		encodedHeader,
+		"",
+		base64.RawURLEncoding.EncodeToString(iv),
+		base64.RawURLEncoding.EncodeToString(sealed[:len(sealed)-gcm.Overhead()]),
+		base64.RawURLEncoding.EncodeToString(sealed[len(sealed)-gcm.Overhead():]),
+	}, ".")
+	got, err := key.DecryptSecFields(token)
+	if err != nil {
+		t.Fatalf("DecryptSecFields: %v", err)
+	}
+	if string(got) != string(plaintext) {
+		t.Fatalf("got %q", got)
 	}
 }
 

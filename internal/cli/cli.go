@@ -192,6 +192,15 @@ func (a *app) matchesProfile(profile model.Profile) bool {
 				matched = true
 				break
 			}
+			for _, alias := range profile.Aliases {
+				if want == strings.ToLower(alias) {
+					matched = true
+					break
+				}
+			}
+			if matched {
+				break
+			}
 		}
 		if !matched {
 			return false
@@ -250,9 +259,17 @@ func (a *app) chromiumDecryptor(profile model.Profile) (chromium.Decryptor, erro
 	}
 
 	spec, _ := discover.Lookup(profile.BrowserKey)
-	appName := spec.LinuxKeyringApp
+	linuxApps := spec.LinuxKeyringCandidates()
+	darwinApps := spec.DarwinKeychainCandidates()
+	if len(linuxApps) == 0 {
+		linuxApps = []string{profile.BrowserKey, "chrome", "chromium"}
+	}
+	if len(darwinApps) == 0 {
+		darwinApps = []string{profile.BrowserKey, "Chrome", "Chromium"}
+	}
+	appName := linuxApps[0]
 	if runtime.GOOS == "darwin" {
-		appName = spec.DarwinKeychain
+		appName = darwinApps[0]
 	}
 	if appName == "" {
 		appName = profile.BrowserKey
@@ -265,6 +282,8 @@ func (a *app) chromiumDecryptor(profile model.Profile) (chromium.Decryptor, erro
 
 	dec, err := crypt.NewChromiumDecryptor(crypt.ChromiumOptions{
 		App:             appName,
+		Apps:            linuxApps,
+		KeychainApps:    darwinApps,
 		LocalStatePath:  localState,
 		KeyringPassword: a.opts.KeyringPassword,
 		ForcePeanuts:    a.opts.Peanuts,
@@ -348,7 +367,7 @@ func (a *app) output(table export.Table, jsonValue any, defaultName string) erro
 }
 
 func outputName(base, format string) string {
-	switch format {
+	switch strings.ToLower(strings.TrimSpace(format)) {
 	case "json":
 		return base + ".json"
 	case "csv":

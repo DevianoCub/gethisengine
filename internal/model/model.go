@@ -14,6 +14,7 @@ type Profile struct {
 	Family     string            `json:"family"`
 	BrowserKey string            `json:"browser_key"`
 	Browser    string            `json:"browser"`
+	Aliases    []string          `json:"aliases,omitempty"`
 	Name       string            `json:"name"`
 	Path       string            `json:"path"`
 	IsDefault  bool              `json:"is_default"`

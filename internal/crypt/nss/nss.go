@@ -15,8 +15,10 @@ import (
 	"crypto/hmac"
 	"crypto/sha1"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/asn1"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash"
@@ -31,7 +33,10 @@ var (
 	oidPBEWithSHA1And3DES = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 12, 5, 1, 3}
 	oidPBES2              = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 5, 13}
 	oidPBKDF2             = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 5, 12}
+	oidHMACSHA1           = asn1.ObjectIdentifier{1, 2, 840, 113549, 2, 7}
 	oidHMACSHA256         = asn1.ObjectIdentifier{1, 2, 840, 113549, 2, 9}
+	oidHMACSHA384         = asn1.ObjectIdentifier{1, 2, 840, 113549, 2, 10}
+	oidHMACSHA512         = asn1.ObjectIdentifier{1, 2, 840, 113549, 2, 11}
 	oidAES256CBC          = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 1, 42}
 	oid3DESCBC            = asn1.ObjectIdentifier{1, 2, 840, 113549, 3, 7}
 )
@@ -77,53 +82,132 @@ func NewKey4(key4Path, masterPassword string) (*Key4, error) {
 		}
 		return nil, fmt.Errorf("%w (%v)", ErrWrongMasterPassword, err)
 	}
-	if !bytes.Equal(check, []byte("password-check\x02\x02")) {
+	if !bytes.Equal(check, []byte("password-check")) &&
+		!bytes.Equal(check, []byte("password-check\x02\x02")) {
 		return nil, ErrWrongMasterPassword
 	}
 
-	rows, err := db.Query("SELECT a11, a102 FROM nssPrivate")
+	// Firefox 144+ stores two keys under the same CKA_ID: a legacy 24-byte
+	// 3DES key and a 32-byte AES key. Other builds use a different CKA_ID
+	// (or none at all), so unwrap every secret-key row and select by the
+	// decrypted length instead of trusting the first row.
+	query := "SELECT a11, a102 FROM nssPrivate"
+	if dbsqlite.HasColumn(db, "nssPrivate", "a0") {
+		query = "SELECT a0, a11, a102 FROM nssPrivate"
+	}
+	rows, err := db.Query(query)
 	if err != nil {
 		return nil, fmt.Errorf("read key4.db nssPrivate: %w", err)
 	}
 	defer rows.Close()
 
-	var master []byte
+	var (
+		keys     [][]byte
+		lastErr  error
+		hasClass bool
+	)
+	hasClass = strings.Contains(query, "a0")
 	for rows.Next() {
-		var a11, a102 []byte
-		if err := rows.Scan(&a11, &a102); err != nil {
-			return nil, fmt.Errorf("scan key4.db nssPrivate: %w", err)
+		var a0, a11, a102 []byte
+		if hasClass {
+			if err := rows.Scan(&a0, &a11, &a102); err != nil {
+				return nil, fmt.Errorf("scan key4.db nssPrivate: %w", err)
+			}
+		} else {
+			if err := rows.Scan(&a11, &a102); err != nil {
+				return nil, fmt.Errorf("scan key4.db nssPrivate: %w", err)
+			}
 		}
 		if len(a11) == 0 {
 			continue
 		}
-		if len(a102) != 0 && !bytes.Equal(a102, ckaID) {
+		// CKO_SECRET_KEY. Older key4.db files may not have a0; in that
+		// case a11 is the only candidate.
+		if hasClass && len(a0) > 0 && !bytes.Equal(a0, []byte{0, 0, 0, 4}) {
 			continue
 		}
 		plain, _, err := decryptPBE(a11, []byte(masterPassword), globalSalt)
 		if err != nil {
-			return nil, fmt.Errorf("decrypt NSS master key: %w", err)
+			lastErr = err
+			continue
 		}
-		master = plain
-		break
+		if len(plain) >= 24 {
+			keys = append(keys, plain)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if len(master) == 0 {
+	if len(keys) == 0 {
+		if lastErr != nil {
+			return nil, fmt.Errorf("decrypt NSS master key: %w", lastErr)
+		}
 		return nil, errors.New("key4.db does not contain a usable master key")
 	}
 
 	key := &Key4{}
-	if len(master) >= 32 {
-		key.aesKey = append([]byte(nil), master[:32]...)
-	}
-	if len(master) >= 24 {
-		key.desKey = append([]byte(nil), master[:24]...)
-	}
-	if key.aesKey == nil && key.desKey == nil {
-		return nil, fmt.Errorf("unexpected NSS master key length %d", len(master))
+	for _, master := range keys {
+		if len(master) >= 32 && key.aesKey == nil {
+			key.aesKey = append([]byte(nil), master[:32]...)
+		}
+		if len(master) >= 24 && key.desKey == nil {
+			key.desKey = append([]byte(nil), master[:24]...)
+		}
 	}
 	return key, nil
+}
+
+// DecryptSecFields decrypts the JWE stored in the secFields column of the
+// loginsL/loginsM tables used by recent Firefox builds. Firefox uses direct
+// AES-256-GCM encryption with the same NSS AES key that protects logins.json.
+func (k *Key4) DecryptSecFields(value string) ([]byte, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	parts := strings.Split(value, ".")
+	if len(parts) != 5 {
+		return nil, fmt.Errorf("secFields is not a compact JWE")
+	}
+	headerRaw, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return nil, fmt.Errorf("decode secFields header: %w", err)
+	}
+	var header struct {
+		Alg string `json:"alg"`
+		Enc string `json:"enc"`
+	}
+	if err := json.Unmarshal(headerRaw, &header); err != nil {
+		return nil, fmt.Errorf("parse secFields header: %w", err)
+	}
+	if header.Alg != "dir" || header.Enc != "A256GCM" {
+		return nil, fmt.Errorf("unsupported secFields JWE %s/%s", header.Alg, header.Enc)
+	}
+	if len(k.aesKey) != 32 {
+		return nil, errors.New("logins.db requires the Firefox 144+ AES-256 key")
+	}
+	iv, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return nil, fmt.Errorf("decode secFields IV: %w", err)
+	}
+	ciphertext, err := base64.RawURLEncoding.DecodeString(parts[3])
+	if err != nil {
+		return nil, fmt.Errorf("decode secFields ciphertext: %w", err)
+	}
+	tag, err := base64.RawURLEncoding.DecodeString(parts[4])
+	if err != nil {
+		return nil, fmt.Errorf("decode secFields tag: %w", err)
+	}
+	block, err := aes.NewCipher(k.aesKey)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	sealed := append(append([]byte(nil), ciphertext...), tag...)
+	return gcm.Open(nil, iv, sealed, []byte(parts[0]))
 }
 
 // NewKey4WithKeys builds a decryptor from already-extracted key material.
@@ -263,6 +347,31 @@ type loginSecret struct {
 	Ciphertext []byte
 }
 
+func seedHash(globalSalt, password []byte) []byte {
+	input := append(append([]byte(nil), globalSalt...), password...)
+	if len(globalSalt) == 48 {
+		sum := sha512.Sum384(input)
+		return sum[:]
+	}
+	sum := sha1.Sum(input)
+	return sum[:]
+}
+
+func pbkdf2Hash(oid asn1.ObjectIdentifier) func() hash.Hash {
+	switch {
+	case len(oid) == 0, oid.Equal(oidHMACSHA1):
+		return sha1.New
+	case oid.Equal(oidHMACSHA256):
+		return sha256.New
+	case oid.Equal(oidHMACSHA384):
+		return sha512.New384
+	case oid.Equal(oidHMACSHA512):
+		return sha512.New
+	default:
+		return sha1.New
+	}
+}
+
 func decryptPBE(der, password, globalSalt []byte) ([]byte, string, error) {
 	var pbe pbeEncrypted
 	if _, err := asn1.Unmarshal(der, &pbe); err != nil {
@@ -304,18 +413,25 @@ func decryptPBE(der, password, globalSalt []byte) ([]byte, string, error) {
 		if keyLen == 0 {
 			keyLen = 32
 		}
-		var hashFn func() hash.Hash = sha256.New
-		if len(params.KDF.Parameters.PRF.Algorithm) != 0 && !params.KDF.Parameters.PRF.Algorithm.Equal(oidHMACSHA256) {
-			hashFn = sha1.New
-		}
+		hashFn := pbkdf2Hash(params.KDF.Parameters.PRF.Algorithm)
 
-		base := sha1.Sum(append(append([]byte(nil), globalSalt...), password...))
-		key := pbkdf2.Key(base[:], params.KDF.Parameters.Salt,
+		// NSS seeds PBKDF2 with SHA-1 for a normal 20-byte global salt and
+		// with SHA-384 once a Primary Password has replaced it with a
+		// 48-byte salt.
+		seed := seedHash(globalSalt, password)
+		key := pbkdf2.Key(seed, params.KDF.Parameters.Salt,
 			params.KDF.Parameters.Iterations, keyLen, hashFn)
 
-		iv, err := asn1.Marshal(params.Scheme.Parameters)
-		if err != nil {
-			return nil, "", fmt.Errorf("reconstruct AES IV: %w", err)
+		// key4.db wraps the NSS master key with a 14-byte IV body; NSS
+		// feeds the two DER header bytes plus the body to AES. Some
+		// implementations store a full 16-byte IV, so accept that too.
+		iv := params.Scheme.Parameters
+		if len(iv) != aes.BlockSize {
+			derIV, err := asn1.Marshal(params.Scheme.Parameters)
+			if err != nil {
+				return nil, "", fmt.Errorf("reconstruct AES IV: %w", err)
+			}
+			iv = derIV
 		}
 		if len(iv) != aes.BlockSize {
 			return nil, "", fmt.Errorf("unexpected AES IV length %d", len(iv))

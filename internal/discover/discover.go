@@ -31,7 +31,7 @@ func Find(extraRoots []string) ([]model.Profile, []string) {
 	}
 
 	for _, spec := range Specs() {
-		for _, base := range spec.BasesForOS() {
+		for _, base := range spec.MatchBasesForOS() {
 			info, err := os.Stat(base)
 			if err != nil || !info.IsDir() {
 				continue
@@ -163,6 +163,7 @@ func chromiumProfiles(spec Spec, base string) []model.Profile {
 			Family:     spec.Family,
 			BrowserKey: spec.Key,
 			Browser:    spec.Name,
+			Aliases:    append([]string(nil), spec.Aliases...),
 			Name:       name,
 			Path:       dir,
 			IsDefault:  isDefault,
@@ -319,6 +320,7 @@ func newFirefoxProfile(spec Spec, dir, name string, isDefault bool) model.Profil
 		Family:     spec.Family,
 		BrowserKey: spec.Key,
 		Browser:    spec.Name,
+		Aliases:    append([]string(nil), spec.Aliases...),
 		Name:       name,
 		Path:       dir,
 		IsDefault:  isDefault,
@@ -327,7 +329,7 @@ func newFirefoxProfile(spec Spec, dir, name string, isDefault bool) model.Profil
 }
 
 func isFirefoxProfileDir(dir string) bool {
-	for _, marker := range []string{"prefs.js", "places.sqlite", "logins.json", "key4.db", "cookies.sqlite"} {
+	for _, marker := range []string{"prefs.js", "places.sqlite", "logins.json", "logins.db", "key4.db", "cookies.sqlite"} {
 		if fileExists(filepath.Join(dir, marker)) {
 			return true
 		}
@@ -338,6 +340,7 @@ func isFirefoxProfileDir(dir string) bool {
 func firefoxArtifacts(dir string) map[string]string {
 	candidates := map[string]string{
 		"logins":      "logins.json",
+		"logins_db":   "logins.db",
 		"key4":        "key4.db",
 		"key3":        "key3.db",
 		"signons":     "signons.sqlite",

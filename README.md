@@ -39,7 +39,7 @@ Safari не поддерживается (другое хранилище и ш�
 nix-shell --run 'go build -o bin/gethisengine ./cmd/gethisengine'
 ```
 
-Или обычным Go 1.22+:
+Или обычным Go 1.26+:
 
 ```sh
 go build -o bin/gethisengine ./cmd/gethisengine
@@ -102,12 +102,15 @@ gethisengine dump --out ./report --format both --reveal
   KeePassXC) для приложения `chrome`, `chromium`, `brave`, `microsoft-edge`,
   `vivaldi`, `opera`, `yandex-browser`, ... Затем PBKDF2-SHA1 (1 итерация,
   `saltysalt`, 16 байт) и AES-128-CBC. Если элемент не найден — legacy
-  fallback `peanuts` (с предупреждением).
-- **macOS:** пароль из Keychain (`security find-generic-password`), PBKDF2
+  fallback `peanuts` (с предупреждением).- **macOS:** пароль из Keychain (`security find-generic-password`), PBKDF2
   SHA1 1003 итерации, AES-128-CBC.
 - **Windows:** `os_crypt.encrypted_key` из `Local State` расшифровывается
   через DPAPI и используется для AES-256-GCM. Старые профили (до Chrome 80)
   читаются напрямую через DPAPI.
+
+Если master-ключ уже известен, его можно передать напрямую:
+`--chromium-key-hex <hex>`. На Linux/macOS это 16-байтовый ключ (CBC), на
+Windows — 32-байтовый (GCM).
 
 **Firefox**
 

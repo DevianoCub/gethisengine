@@ -14,11 +14,25 @@ func platformChromiumKey(opts ChromiumOptions) ([]byte, int, string, string, err
 	if opts.KeyringPassword != "" {
 		return deriveDarwinKey(opts.KeyringPassword), ModeCBC, "password supplied on the command line", "", nil
 	}
-	pass, err := keychainPassword(opts.App)
-	if err != nil {
-		return nil, ModeCBC, "", "", fmt.Errorf("read macOS Keychain entry for %q: %w", opts.App, err)
+	apps := opts.KeychainApps
+	if len(apps) == 0 {
+		apps = []string{opts.App}
 	}
-	return deriveDarwinKey(pass), ModeCBC, "macOS Keychain (" + opts.App + ")", "", nil
+	var lastErr error
+	for _, app := range apps {
+		if app == "" {
+			continue
+		}
+		pass, err := keychainPassword(app)
+		if err == nil && pass != "" {
+			return deriveDarwinKey(pass), ModeCBC, "macOS Keychain (" + app + ")", "", nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("keychain item not found")
+	}
+	return nil, ModeCBC, "", "", fmt.Errorf("read macOS Keychain entry for %s: %w", strings.Join(apps, ", "), lastErr)
 }
 
 // keychainPassword reads the "<App> Safe Storage" item from the login

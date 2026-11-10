@@ -171,7 +171,7 @@ func TestBookmarksAndAutofill(t *testing.T) {
 			"bookmark_bar": map[string]any{
 				"type": "folder", "name": "Bookmarks",
 				"children": []any{
-					map[string]any{"type": "url", "name": "Example", "url": "https://example.com", "date_added": "13350000000000000"},
+					map[string]any{"type": "url", "name": "Example", "url": "https://example.com", "date_added": int64(13350000000000000)},
 					map[string]any{"type": "folder", "name": "Nested", "children": []any{
 						map[string]any{"type": "url", "name": "Nested page", "url": "https://nested.example", "date_added": "13350000000000001"},
 					}},
@@ -196,6 +196,9 @@ func TestBookmarksAndAutofill(t *testing.T) {
 	}
 	if found[0].Folder != "Bookmarks" || found[1].Folder != "Bookmarks/Nested" {
 		t.Fatalf("unexpected folders: %q, %q", found[0].Folder, found[1].Folder)
+	}
+	if found[0].Added.IsZero() {
+		t.Fatal("numeric date_added was not parsed")
 	}
 
 	db := createDB(t, filepath.Join(dir, "Web Data"), `

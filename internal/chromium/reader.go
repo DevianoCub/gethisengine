@@ -267,11 +267,23 @@ func stripCookieDomainHash(host string, plain []byte) []byte {
 
 // ------------------------------------------------------------------ bookmarks
 type bookmarkNode struct {
-	Type      string         `json:"type"`
-	Name      string         `json:"name"`
-	URL       string         `json:"url"`
-	DateAdded string         `json:"date_added"`
-	Children  []bookmarkNode `json:"children"`
+	Type      string          `json:"type"`
+	Name      string          `json:"name"`
+	URL       string          `json:"url"`
+	DateAdded json.RawMessage `json:"date_added"`
+	Children  []bookmarkNode  `json:"children"`
+}
+
+func bookmarkTime(raw json.RawMessage) time.Time {
+	value := strings.Trim(strings.TrimSpace(string(raw)), `"`)
+	if value == "" {
+		return time.Time{}
+	}
+	micros, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return time.Time{}
+	}
+	return chromeTime(micros)
 }
 
 type bookmarksFile struct {
@@ -299,17 +311,13 @@ func Bookmarks(profile model.Profile) ([]model.Bookmark, []string) {
 	walk = func(node bookmarkNode, folder string) {
 		switch node.Type {
 		case "url":
-			added := time.Time{}
-			if micros, err := strconv.ParseInt(node.DateAdded, 10, 64); err == nil {
-				added = chromeTime(micros)
-			}
 			out = append(out, model.Bookmark{
 				Browser: profile.Browser,
 				Profile: profile.Name,
 				Folder:  folder,
 				Title:   node.Name,
 				URL:     node.URL,
-				Added:   added,
+				Added:   bookmarkTime(node.DateAdded),
 			})
 		case "folder":
 			next := folder

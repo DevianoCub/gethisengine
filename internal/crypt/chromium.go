@@ -30,7 +30,10 @@ var (
 // ChromiumOptions controls how the Chromium master key is obtained.
 type ChromiumOptions struct {
 	// App is the keyring/keychain application identifier, e.g. "chrome".
-	App string
+	// Apps/KeychainApps add fallbacks for forks that reuse another id.
+	App          string
+	Apps         []string
+	KeychainApps []string
 	// LocalStatePath points at the browser's Local State file (Windows only).
 	LocalStatePath string
 	// KeyringPassword overrides automatic keyring lookup.
