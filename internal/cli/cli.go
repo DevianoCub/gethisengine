@@ -87,8 +87,8 @@ func newRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	root.SetErr(stderr)
 
 	flags := root.PersistentFlags()
-	flags.StringArrayVar(&a.opts.Browsers, "browser", nil, "only this browser key or family (chrome, brave, firefox, chromium, ...); repeatable")
-	flags.StringArrayVar(&a.opts.Profiles, "profile", nil, "only profiles whose name matches this substring; repeatable")
+	flags.StringArrayVar(&a.opts.Browsers, "browser", nil, "only this browser key/family/alias; repeat or separate with commas")
+	flags.StringArrayVar(&a.opts.Profiles, "profile", nil, "only profiles whose name matches this substring; repeat or separate with commas")
 	flags.StringArrayVar(&a.opts.Roots, "root", nil, "extra directory to scan (Chromium User Data, Firefox profile or base directory); repeatable")
 	flags.BoolVar(&a.opts.Reveal, "reveal", false, "decrypt and print saved passwords and cookie values")
 	flags.StringVar(&a.opts.KeyringPassword, "keyring-password", "", "use this Linux keyring password instead of querying Secret Service")
@@ -107,6 +107,7 @@ func newRootCommand(stdout, stderr io.Writer) *cobra.Command {
 		newBookmarksCommand(a),
 		newAutofillCommand(a),
 		newDumpCommand(a),
+		newTUICommand(a),
 	)
 	return root
 }
@@ -181,7 +182,7 @@ func (a *app) loadProfiles() ([]model.Profile, error) {
 func (a *app) matchesProfile(profile model.Profile) bool {
 	if len(a.opts.Browsers) > 0 {
 		matched := false
-		for _, want := range a.opts.Browsers {
+		for _, want := range splitList(a.opts.Browsers) {
 			want = strings.ToLower(strings.TrimSpace(want))
 			if want == "" {
 				continue
@@ -208,7 +209,7 @@ func (a *app) matchesProfile(profile model.Profile) bool {
 	}
 	if len(a.opts.Profiles) > 0 {
 		matched := false
-		for _, want := range a.opts.Profiles {
+		for _, want := range splitList(a.opts.Profiles) {
 			want = strings.ToLower(strings.TrimSpace(want))
 			if want == "" {
 				continue
@@ -224,6 +225,18 @@ func (a *app) matchesProfile(profile model.Profile) bool {
 		}
 	}
 	return true
+}
+
+func splitList(values []string) []string {
+	var out []string
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				out = append(out, part)
+			}
+		}
+	}
+	return out
 }
 
 // chromiumDecryptor returns a cached decryptor for a Chromium profile. A nil

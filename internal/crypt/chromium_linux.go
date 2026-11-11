@@ -32,8 +32,7 @@ func platformChromiumKey(opts ChromiumOptions) ([]byte, int, string, string, err
 	if len(apps) == 0 {
 		apps = []string{opts.App}
 	}
-	var lastErr error
-	locked := false
+	var lockedErr error
 	for _, app := range apps {
 		if app == "" {
 			continue
@@ -45,23 +44,16 @@ func platformChromiumKey(opts ChromiumOptions) ([]byte, int, string, string, err
 		if errors.Is(err, errKeyringLocked) {
 			// Do not try the same item through secret-tool: it would also
 			// block or fail. Remember it and report a useful error later.
-			locked = true
-			lastErr = err
+			lockedErr = err
 			continue
-		}
-		if err != nil && !errors.Is(err, errKeyringNotFound) && !errors.Is(err, errKeyringUnavailable) {
-			lastErr = err
 		}
 		pass, err = secretToolPassword(app)
 		if err == nil && pass != "" {
 			return deriveLinuxKey(pass), ModeCBC, "secret-tool (" + app + ")", "", nil
 		}
-		if err != nil && !errors.Is(err, errKeyringNotFound) {
-			lastErr = err
-		}
 	}
-	if locked {
-		return nil, ModeCBC, "", "", lastErr
+	if lockedErr != nil {
+		return nil, ModeCBC, "", "", lockedErr
 	}
 	return deriveLinuxKey("peanuts"), ModeCBC, `"peanuts" (keyring item not found)`,
 		`no Secret Service item for ` + quoteList(apps) + `; fell back to the legacy "peanuts" password`, nil

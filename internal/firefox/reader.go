@@ -174,7 +174,7 @@ func passwordsFromDB(profile model.Profile, key *nss.Key4, path string) ([]model
 			}
 			key := guid.String
 			if key == "" {
-				key = origin.String + "\x00" + realm.String + "\x00" + action.String
+				key = origin.String + "\x00" + realm.String + "\x00" + action.String + "\x00" + fmt.Sprint(created.Int64)
 			}
 			if seen[key] {
 				continue

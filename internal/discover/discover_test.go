@@ -118,3 +118,47 @@ func TestCustomRootRejectsUnknownDirectory(t *testing.T) {
 		t.Fatalf("expected a warning for an unrecognised directory, got %v", warnings)
 	}
 }
+
+func TestSpecsCoverage(t *testing.T) {
+	want := []string{
+		"chrome", "chromium", "brave", "edge", "vivaldi", "opera", "yandex",
+		"helium", "ungoogled-chromium", "thorium", "arc",
+		"firefox", "librewolf", "waterfox", "floorp", "zen", "palemoon",
+		"seamonkey", "tor-browser", "mullvad-browser",
+	}
+	have := make(map[string]bool)
+	for _, spec := range Specs() {
+		have[spec.Key] = true
+		if spec.Name == "" || (spec.Family != FamilyChromium && spec.Family != FamilyFirefox) {
+			t.Fatalf("incomplete spec: %+v", spec)
+		}
+	}
+	for _, key := range want {
+		if !have[key] {
+			t.Errorf("missing browser spec %q", key)
+		}
+	}
+}
+
+func TestKeyringCandidatesAreDeduplicated(t *testing.T) {
+	spec, ok := Lookup("helium")
+	if !ok {
+		t.Fatal("helium spec not found")
+	}
+	candidates := spec.LinuxKeyringCandidates()
+	seen := make(map[string]bool)
+	for _, candidate := range candidates {
+		if candidate == "" {
+			t.Fatal("empty keyring candidate")
+		}
+		if seen[candidate] {
+			t.Fatalf("duplicate keyring candidate %q", candidate)
+		}
+		seen[candidate] = true
+	}
+	for _, want := range []string{"helium", "chromium", "chrome"} {
+		if !seen[want] {
+			t.Errorf("missing keyring fallback %q: %v", want, candidates)
+		}
+	}
+}

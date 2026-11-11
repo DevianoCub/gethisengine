@@ -14,6 +14,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"gethisengine/internal/model"
 )
 
 func cliPad(data []byte, blockSize int) []byte {
@@ -217,5 +219,54 @@ func TestCLIDump(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(outDir, name)); err != nil {
 			t.Fatalf("missing %s: %v", name, err)
 		}
+	}
+}
+
+func TestMatchesProfileAlias(t *testing.T) {
+	a := &app{opts: Options{Browsers: []string{"firefox, ungoogled"}}}
+	profile := model.Profile{
+		Family:     model.FamilyChromium,
+		BrowserKey: "chromium",
+		Browser:    "Chromium",
+		Aliases:    []string{"ungoogled", "ug"},
+	}
+	if !a.matchesProfile(profile) {
+		t.Fatal("alias did not match the profile")
+	}
+	a.opts.Browsers = []string{"firefox"}
+	if a.matchesProfile(profile) {
+		t.Fatal("unrelated browser matched the profile")
+	}
+}
+
+func TestOutputNameIsCaseInsensitive(t *testing.T) {
+	if got := outputName("passwords", "JSON"); got != "passwords.json" {
+		t.Fatalf("got %q", got)
+	}
+	if got := outputName("passwords", "CSV"); got != "passwords.csv" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestSplitList(t *testing.T) {
+	got := splitList([]string{"firefox, helium", "brave"})
+	want := []string{"firefox", "helium", "brave"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
+
+func TestTruncateANSI(t *testing.T) {
+	input := "\x1b[7mabcdef\x1b[0m"
+	if got := truncateANSI(input, 3); got != "\x1b[7mabc" {
+		t.Fatalf("got %q", got)
+	}
+	if got := truncateANSI("abcdef", 10); got != "abcdef" {
+		t.Fatalf("got %q", got)
 	}
 }

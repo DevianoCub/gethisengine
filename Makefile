@@ -3,6 +3,10 @@ VERSION ?= 0.1.0
 PKG     := gethisengine/internal/cli
 LDFLAGS := -s -w -X $(PKG).Version=$(VERSION)
 
+# The project uses modernc.org/sqlite and must remain buildable without a C
+# toolchain, including for cross-compilation.
+export CGO_ENABLED := 0
+
 .PHONY: build test vet fmt cross clean
 
 build:
